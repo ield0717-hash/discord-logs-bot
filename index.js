@@ -6,7 +6,11 @@ const {
   SlashCommandBuilder, 
   EmbedBuilder, 
   PermissionFlagsBits,
-  MessageFlags 
+  MessageFlags,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType
 } = require('discord.js');
 const http = require('http');
 
@@ -23,7 +27,7 @@ const client = new Client({
   ],
 });
 
-// Port binding for Render hosting (0.0.0.0 allows external pings from UptimeRobot)
+// Port binding for Render hosting
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -114,7 +118,36 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Generic Log Fetcher Function
+// Helper function to build log page embeds
+function buildLogEmbed(entries, category, titleEmoji, page, totalPages, searchQuery) {
+  const itemsPerPage = 8;
+  const startIndex = (page - 1) * itemsPerPage;
+  const pageEntries = entries.slice(startIndex, startIndex + itemsPerPage);
+
+  let logLines = pageEntries.map(e => {
+    const time = e.time || 'N/A';
+    const user = `**${e.username || 'Unknown'}** (\`${e.userId || 'N/A'}\`)`;
+
+    if (category === 'chats') return `\`[${time}]\` ${user}\n└ ${e.message}`;
+    if (category === 'commands') return `\`[${time}]\` ${user}\n└ Command: \`${e.command}\``;
+    if (category === 'joins') return `\`[${time}]\` 🟢 ${user} joined`;
+    if (category === 'leaves') return `\`[${time}]\` 🔴 ${user} left`;
+    return '';
+  });
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${titleEmoji} Game Logs: ${category.toUpperCase()}`)
+    .setColor('#2F3136')
+    .setDescription(logLines.join('\n\n'))
+    .setFooter({ 
+      text: `Page ${page} of ${totalPages} | Total Records: ${entries.length}` + (searchQuery ? ` | Filter: ${searchQuery}` : '') 
+    })
+    .setTimestamp();
+
+  return embed;
+}
+
+// Generic Log Fetcher Function with Interactive Pagination
 async function handleLogCommand(interaction, category, titleEmoji) {
   const isStaff = (STAFF_ROLE_ID && interaction.member.roles.cache.has(STAFF_ROLE_ID)) ||
                   interaction.member.permissions.has(PermissionFlagsBits.Administrator);
@@ -127,7 +160,6 @@ async function handleLogCommand(interaction, category, titleEmoji) {
 
   const searchQuery = interaction.options.getString('search')?.toLowerCase();
   
-  // Clean up URL formatting
   let cleanUrl = (FIREBASE_URL || '').trim();
   if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
     cleanUrl = 'https://' + cleanUrl;
@@ -163,29 +195,63 @@ async function handleLogCommand(interaction, category, titleEmoji) {
       return interaction.editReply(`ℹ️ No logs found matching query: \`${searchQuery}\`.`);
     }
 
-    // Sort newest to oldest and take top 15
+    // Sort newest to oldest
     entries.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    const recentEntries = entries.slice(0, 15);
 
-    let logBody = '';
-    if (category === 'chats') {
-      logBody = recentEntries.map(e => `\`[${e.time || 'N/A'}]\` **${e.username}** (\`${e.userId}\`): ${e.message}`).join('\n');
-    } else if (category === 'commands') {
-      logBody = recentEntries.map(e => `\`[${e.time || 'N/A'}]\` **${e.username}**: \`${e.command}\``).join('\n');
-    } else if (category === 'joins') {
-      logBody = recentEntries.map(e => `\`[${e.time || 'N/A'}]\` 🟢 **${e.username}** (\`${e.userId}\`) joined`).join('\n');
-    } else if (category === 'leaves') {
-      logBody = recentEntries.map(e => `\`[${e.time || 'N/A'}]\` 🔴 **${e.username}** (\`${e.userId}\`) left`).join('\n');
-    }
+    const itemsPerPage = 8;
+    const totalPages = Math.ceil(entries.length / itemsPerPage);
+    let currentPage = 1;
 
-    const embed = new EmbedBuilder()
-      .setTitle(`${titleEmoji} Game Logs: ${category.toUpperCase()}`)
-      .setColor('Blue')
-      .setDescription(logBody.substring(0, 4000))
-      .setFooter({ text: searchQuery ? `Filtered by: ${searchQuery}` : 'Showing global history' })
-      .setTimestamp();
+    // Build buttons
+    const getButtons = (page) => new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('prev_page')
+        .setLabel('◀ Previous')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(page === 1),
+      new ButtonBuilder()
+        .setCustomId('next_page')
+        .setLabel('Next ▶')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(page === totalPages)
+    );
 
-    await interaction.editReply({ embeds: [embed] });
+    const initialEmbed = buildLogEmbed(entries, category, titleEmoji, currentPage, totalPages, searchQuery);
+    const response = await interaction.editReply({ 
+      embeds: [initialEmbed], 
+      components: totalPages > 1 ? [getButtons(currentPage)] : [] 
+    });
+
+    if (totalPages <= 1) return;
+
+    // Collector for button pagination (Active for 2 minutes)
+    const collector = response.createMessageComponentCollector({ 
+      componentType: ComponentType.Button, 
+      time: 120000 
+    });
+
+    collector.on('collect', async i => {
+      if (i.user.id !== interaction.user.id) {
+        return i.reply({ content: '❌ Only the command runner can use these buttons.', flags: MessageFlags.Ephemeral });
+      }
+
+      if (i.customId === 'prev_page' && currentPage > 1) {
+        currentPage--;
+      } else if (i.customId === 'next_page' && currentPage < totalPages) {
+        currentPage++;
+      }
+
+      const newEmbed = buildLogEmbed(entries, category, titleEmoji, currentPage, totalPages, searchQuery);
+      await i.update({ embeds: [newEmbed], components: [getButtons(currentPage)] });
+    });
+
+    collector.on('end', async () => {
+      const disabledButtons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('prev_page').setLabel('◀ Previous').setStyle(ButtonStyle.Primary).setDisabled(true),
+        new ButtonBuilder().setCustomId('next_page').setLabel('Next ▶').setStyle(ButtonStyle.Primary).setDisabled(true)
+      );
+      await interaction.editReply({ components: [disabledButtons] }).catch(() => {});
+    });
 
   } catch (err) {
     console.error('Firebase Fetch Error:', err);
