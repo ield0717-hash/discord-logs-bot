@@ -5,7 +5,8 @@ const {
   Routes, 
   SlashCommandBuilder, 
   EmbedBuilder, 
-  PermissionFlagsBits 
+  PermissionFlagsBits,
+  MessageFlags 
 } = require('discord.js');
 const http = require('http');
 
@@ -22,12 +23,14 @@ const client = new Client({
   ],
 });
 
-// Port binding for Render hosting
-const port = process.env.PORT || 3000;
+// Port binding for Render hosting (0.0.0.0 allows external pings from UptimeRobot)
+const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Logs & Auto-Mod Bot is live!');
-}).listen(port);
+}).listen(PORT, '0.0.0.0', () => {
+  console.log(`HTTP Server listening on port ${PORT}`);
+});
 
 const userWarnings = new Map();
 
@@ -117,35 +120,42 @@ async function handleLogCommand(interaction, category, titleEmoji) {
                   interaction.member.permissions.has(PermissionFlagsBits.Administrator);
 
   if (!isStaff) {
-    return interaction.reply({ content: '🔒 **Access Denied:** Staff members only.', ephemeral: true });
+    return interaction.reply({ content: '🔒 **Access Denied:** Staff members only.', flags: MessageFlags.Ephemeral });
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const searchQuery = interaction.options.getString('search')?.toLowerCase();
-  const cleanUrl = (FIREBASE_URL || '').trim().replace(/\/$/, '');
+  
+  // Clean up URL formatting
+  let cleanUrl = (FIREBASE_URL || '').trim();
+  if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+    cleanUrl = 'https://' + cleanUrl;
+  }
+  cleanUrl = cleanUrl.replace(/\/$/, '');
+
   const queryUrl = `${cleanUrl}/logs/${category}.json`;
 
   try {
     const res = await fetch(queryUrl);
 
     if (!res.ok) {
-      return interaction.editReply(`ℹ️ Could not connect to Firebase path. Ensure database URL is valid.`);
+      return interaction.editReply(`⚠️ Firebase HTTP Error **${res.status} ${res.statusText}**. Check your FIREBASE_URL variable on Render.`);
     }
 
     const data = await res.json();
 
     if (!data || typeof data !== 'object') {
-      return interaction.editReply(`ℹ️ No ${category} logs recorded in Firebase yet. Launch Roblox and trigger events first!`);
+      return interaction.editReply(`ℹ️ No **${category}** logs recorded in Firebase yet. Launch Roblox and play first!`);
     }
 
     let entries = Object.values(data);
 
-    // Apply optional search filter
+    // Apply search filter
     if (searchQuery) {
       entries = entries.filter(e => 
         (e.username && e.username.toLowerCase().includes(searchQuery)) || 
-        (e.userId && e.userId.toLowerCase() === searchQuery)
+        (e.userId && String(e.userId).toLowerCase() === searchQuery)
       );
     }
 
@@ -159,13 +169,13 @@ async function handleLogCommand(interaction, category, titleEmoji) {
 
     let logBody = '';
     if (category === 'chats') {
-      logBody = recentEntries.map(e => `\`[${e.time}]\` **${e.username}** (\`${e.userId}\`): ${e.message}`).join('\n');
+      logBody = recentEntries.map(e => `\`[${e.time || 'N/A'}]\` **${e.username}** (\`${e.userId}\`): ${e.message}`).join('\n');
     } else if (category === 'commands') {
-      logBody = recentEntries.map(e => `\`[${e.time}]\` **${e.username}**: \`${e.command}\``).join('\n');
+      logBody = recentEntries.map(e => `\`[${e.time || 'N/A'}]\` **${e.username}**: \`${e.command}\``).join('\n');
     } else if (category === 'joins') {
-      logBody = recentEntries.map(e => `\`[${e.time}]\` 🟢 **${e.username}** (\`${e.userId}\`) joined`).join('\n');
+      logBody = recentEntries.map(e => `\`[${e.time || 'N/A'}]\` 🟢 **${e.username}** (\`${e.userId}\`) joined`).join('\n');
     } else if (category === 'leaves') {
-      logBody = recentEntries.map(e => `\`[${e.time}]\` 🔴 **${e.username}** (\`${e.userId}\`) left`).join('\n');
+      logBody = recentEntries.map(e => `\`[${e.time || 'N/A'}]\` 🔴 **${e.username}** (\`${e.userId}\`) left`).join('\n');
     }
 
     const embed = new EmbedBuilder()
@@ -178,8 +188,8 @@ async function handleLogCommand(interaction, category, titleEmoji) {
     await interaction.editReply({ embeds: [embed] });
 
   } catch (err) {
-    console.error('Firebase Query Error:', err);
-    await interaction.editReply('❌ Failed to fetch data from Firebase. Check your `FIREBASE_URL` on Render.');
+    console.error('Firebase Fetch Error:', err);
+    await interaction.editReply(`❌ Network error: \`${err.message}\`. Verify your \`FIREBASE_URL\` setting.`);
   }
 }
 
