@@ -22,7 +22,7 @@ const client = new Client({
   ],
 });
 
-// Create a basic HTTP server to satisfy hosting platforms like Render
+// Port binding for Render hosting
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -40,60 +40,43 @@ const {
   STAFF_ROLE_ID
 } = process.env;
 
-// Helper Function: Resolve Roblox Username to User ID
-async function resolveRobloxUser(input) {
-  if (/^\d+$/.test(input)) return { id: input, username: input };
-  try {
-    const res = await fetch('https://users.roblox.com/v1/usernames/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ usernames: [input], excludeBannedUsers: false }),
-    });
-    const data = await res.json();
-    if (data.data && data.data.length > 0) {
-      return { id: data.data[0].id.toString(), username: data.data[0].name };
-    }
-  } catch (err) {
-    console.error('Error resolving Roblox username:', err);
-  }
-  return null;
-}
-
-// Define Slash Command (/get-logs)
+// Define 4 Log Commands
 const commands = [
   new SlashCommandBuilder()
-    .setName('get-logs')
-    .setDescription('Staff Only: Search player chats or join history')
-    .addStringOption(opt => 
-      opt.setName('username')
-         .setDescription('Roblox Username or User ID')
-         .setRequired(true)
-    )
-    .addStringOption(opt => 
-      opt.setName('type')
-         .setDescription('Log type')
-         .setRequired(true)
-         .addChoices(
-           { name: 'In-Game Chat Messages', value: 'chats' },
-           { name: 'Join & Leave Sessions', value: 'sessions' }
-         )
-    ),
+    .setName('chat-logs')
+    .setDescription('Show overall chat logs (optional: filter by user)')
+    .addStringOption(opt => opt.setName('search').setDescription('Search by Username or User ID').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('join-logs')
+    .setDescription('Show player join history (optional: filter by user)')
+    .addStringOption(opt => opt.setName('search').setDescription('Search by Username or User ID').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('leave-logs')
+    .setDescription('Show player leave history (optional: filter by user)')
+    .addStringOption(opt => opt.setName('search').setDescription('Search by Username or User ID').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('command-logs')
+    .setDescription('Show executed game commands (optional: filter by user)')
+    .addStringOption(opt => opt.setName('search').setDescription('Search by Username or User ID').setRequired(false)),
 ].map(cmd => cmd.toJSON());
 
 const botToken = TOKEN || DISCORD_TOKEN;
 const rest = new REST({ version: '10' }).setToken(botToken);
 
-// Register Command with Discord API
+// Register Commands with Discord
 (async () => {
   try {
-    console.log('Registering /get-logs slash command...');
+    console.log('Registering 4 slash commands...');
     await rest.put(
       Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
       { body: commands }
     );
-    console.log('Slash command registered successfully!');
+    console.log('Slash commands registered successfully!');
   } catch (err) {
-    console.error('Failed to register slash command:', err);
+    console.error('Failed to register slash commands:', err);
   }
 })();
 
@@ -101,11 +84,9 @@ client.once('ready', () => {
   console.log(`✅ Logged in as ${client.user.tag}!`);
 });
 
-// Auto-Moderation Listener (Swear Warning + 10-Minute Timeout)
+// Auto-Moderation Listener
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
-  
-  // Ignore administrators and moderators from auto-mod
   if (message.member.permissions.has(PermissionFlagsBits.ManageMessages)) return;
 
   if (filter.isProfane(message.content)) {
@@ -130,58 +111,83 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Slash Command Interaction Handling
+// Generic Log Fetcher Function
+async function handleLogCommand(interaction, category, titleEmoji) {
+  const isStaff = (STAFF_ROLE_ID && interaction.member.roles.cache.has(STAFF_ROLE_ID)) ||
+                  interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+
+  if (!isStaff) {
+    return interaction.reply({ content: '🔒 **Access Denied:** Staff members only.', ephemeral: true });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const searchQuery = interaction.options.getString('search')?.toLowerCase();
+  const cleanUrl = (FIREBASE_URL || '').replace(/\/$/, '');
+  const queryUrl = `${cleanUrl}/logs/${category}.json`;
+
+  try {
+    const res = await fetch(queryUrl);
+    const data = await res.json();
+
+    if (!data) {
+      return interaction.editReply(`ℹ️ No ${category} logs recorded yet.`);
+    }
+
+    let entries = Object.values(data);
+
+    // Apply optional search filter
+    if (searchQuery) {
+      entries = entries.filter(e => 
+        e.username.toLowerCase().includes(searchQuery) || 
+        e.userId.toLowerCase() === searchQuery
+      );
+    }
+
+    if (entries.length === 0) {
+      return interaction.editReply(`ℹ️ No logs found matching query: \`${searchQuery}\`.`);
+    }
+
+    // Sort newest to oldest and take top 15
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+    const recentEntries = entries.slice(0, 15);
+
+    let logBody = '';
+    if (category === 'chats') {
+      logBody = recentEntries.map(e => `\`[${e.time}]\` **${e.username}** (\`${e.userId}\`): ${e.message}`).join('\n');
+    } else if (category === 'commands') {
+      logBody = recentEntries.map(e => `\`[${e.time}]\` **${e.username}**: \`${e.command}\``).join('\n');
+    } else if (category === 'joins') {
+      logBody = recentEntries.map(e => `\`[${e.time}]\` 🟢 **${e.username}** (\`${e.userId}\`) joined`).join('\n');
+    } else if (category === 'leaves') {
+      logBody = recentEntries.map(e => `\`[${e.time}]\` 🔴 **${e.username}** (\`${e.userId}\`) left`).join('\n');
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${titleEmoji} Game Logs: ${category.toUpperCase()}`)
+      .setColor('Blue')
+      .setDescription(logBody.substring(0, 4000))
+      .setFooter({ text: searchQuery ? `Filtered by: ${searchQuery}` : 'Showing global history' })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+
+  } catch (err) {
+    console.error('Firebase Query Error:', err);
+    await interaction.editReply('❌ Failed to fetch data from Firebase.');
+  }
+}
+
+// Slash Command Interaction Listener
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  const { commandName, options } = interaction;
+  const { commandName } = interaction;
 
-  if (commandName === 'get-logs') {
-    // Permission check: Must have STAFF_ROLE_ID or Administrator
-    const isStaff = (STAFF_ROLE_ID && interaction.member.roles.cache.has(STAFF_ROLE_ID)) ||
-                    interaction.member.permissions.has(PermissionFlagsBits.Administrator);
-
-    if (!isStaff) {
-      return interaction.reply({ content: '🔒 **Access Denied:** Staff members only.', ephemeral: true });
-    }
-
-    await interaction.deferReply({ ephemeral: true });
-
-    const userInput = options.getString('username');
-    const logType = options.getString('type');
-    const robloxUser = await resolveRobloxUser(userInput);
-
-    if (!robloxUser) return interaction.editReply(`❌ User \`${userInput}\` not found on Roblox.`);
-
-    const cleanUrl = (FIREBASE_URL || '').replace(/\/$/, '');
-    const queryUrl = `${cleanUrl}/logs/${logType}/${robloxUser.id}.json`;
-
-    try {
-      const res = await fetch(queryUrl);
-      const data = await res.json();
-
-      if (!data) return interaction.editReply(`ℹ️ No ${logType} logs found for **${robloxUser.username}**.`);
-
-      // Format top 15 log entries
-      const entries = Object.values(data).sort((a, b) => b.timestamp - a.timestamp).slice(0, 15);
-      
-      const logBody = logType === 'chats'
-        ? entries.map(e => `\`[${e.date} ${e.time}]\` **Chat:** ${e.message}`).join('\n')
-        : entries.map(e => `\`[${e.date} ${e.time}]\` **Status:** ${e.type === 'JOIN' ? '🟢 Joined' : '🔴 Left'}`).join('\n');
-
-      const embed = new EmbedBuilder()
-        .setTitle(`📜 Game Logs: ${robloxUser.username}`)
-        .setColor('Blue')
-        .setDescription(logBody.substring(0, 4000))
-        .setFooter({ text: `Requested by ${interaction.user.tag}` })
-        .setTimestamp();
-
-      await interaction.editReply({ embeds: [embed] });
-    } catch (err) {
-      console.error('Firebase Query Error:', err);
-      await interaction.editReply('❌ Failed to fetch data from Firebase.');
-    }
-  }
+  if (commandName === 'chat-logs') await handleLogCommand(interaction, 'chats', '💬');
+  if (commandName === 'join-logs') await handleLogCommand(interaction, 'joins', '🟢');
+  if (commandName === 'leave-logs') await handleLogCommand(interaction, 'leaves', '🔴');
+  if (commandName === 'command-logs') await handleLogCommand(interaction, 'commands', '⚙️');
 });
 
 client.login(botToken);
