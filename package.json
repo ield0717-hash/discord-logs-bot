@@ -1,0 +1,12 @@
+{
+  "name": "discord-logs-automod-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "bad-words": "^3.0.4",
+    "discord.js": "^14.14.1"
+  }
+}
