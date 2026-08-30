@@ -123,15 +123,20 @@ async function handleLogCommand(interaction, category, titleEmoji) {
   await interaction.deferReply({ ephemeral: true });
 
   const searchQuery = interaction.options.getString('search')?.toLowerCase();
-  const cleanUrl = (FIREBASE_URL || '').replace(/\/$/, '');
+  const cleanUrl = (FIREBASE_URL || '').trim().replace(/\/$/, '');
   const queryUrl = `${cleanUrl}/logs/${category}.json`;
 
   try {
     const res = await fetch(queryUrl);
+
+    if (!res.ok) {
+      return interaction.editReply(`ℹ️ Could not connect to Firebase path. Ensure database URL is valid.`);
+    }
+
     const data = await res.json();
 
-    if (!data) {
-      return interaction.editReply(`ℹ️ No ${category} logs recorded yet.`);
+    if (!data || typeof data !== 'object') {
+      return interaction.editReply(`ℹ️ No ${category} logs recorded in Firebase yet. Launch Roblox and trigger events first!`);
     }
 
     let entries = Object.values(data);
@@ -139,8 +144,8 @@ async function handleLogCommand(interaction, category, titleEmoji) {
     // Apply optional search filter
     if (searchQuery) {
       entries = entries.filter(e => 
-        e.username.toLowerCase().includes(searchQuery) || 
-        e.userId.toLowerCase() === searchQuery
+        (e.username && e.username.toLowerCase().includes(searchQuery)) || 
+        (e.userId && e.userId.toLowerCase() === searchQuery)
       );
     }
 
@@ -149,7 +154,7 @@ async function handleLogCommand(interaction, category, titleEmoji) {
     }
 
     // Sort newest to oldest and take top 15
-    entries.sort((a, b) => b.timestamp - a.timestamp);
+    entries.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
     const recentEntries = entries.slice(0, 15);
 
     let logBody = '';
@@ -174,7 +179,7 @@ async function handleLogCommand(interaction, category, titleEmoji) {
 
   } catch (err) {
     console.error('Firebase Query Error:', err);
-    await interaction.editReply('❌ Failed to fetch data from Firebase.');
+    await interaction.editReply('❌ Failed to fetch data from Firebase. Check your `FIREBASE_URL` on Render.');
   }
 }
 
